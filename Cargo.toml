@@ -1,0 +1,10 @@
+[package]
+name = "falsh"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.29.0"
+dirs = "6.0.0"
+glob = "0.3.3"
+rustyline = "17.0.1"
