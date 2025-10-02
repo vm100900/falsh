@@ -1,6 +1,6 @@
 [package]
 name = "falsh"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Viren <virenvmane@outlook.com>"]
 edition = "2024"
 description = "Falsh – Friendly and Light Shell Falsh is a fast, intuitive shell at just 3.4 MB. Its name stands for Friendly And Light SHell. Features include smart autocomplete, path management with persistence, globbing and pipelines, I/O redirection, custom startup via .falshrc, and a friendly interface with dynamic prompts and arrow-key navigation."  
