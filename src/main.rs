@@ -165,8 +165,8 @@ fn add_to_path(user_input: &str, temporary: bool) {
     if !path_env.split(':').any(|p| p == add_str) {
         if !path_env.is_empty() { path_env.push(':'); }
         path_env.push_str(&add_str);
-        unsafe{
-        env::set_var("PATH", &path_env);
+        unsafe {
+            env::set_var("PATH", &path_env);
         }
     }
 }
@@ -226,8 +226,9 @@ fn load_persistent_into_env() {
     }
 }
 
-fn execute_line(input: &str) {
-    if input.is_empty() { return; }
+/// ------------------- UPDATED EXECUTE_LINE -------------------
+fn execute_line(input: &str) -> Result<(), String> {
+    if input.is_empty() { return Ok(()); }
 
     let pipeline: Vec<&str> = input.split('|').map(|s| s.trim()).collect();
     let mut previous_output: Option<Stdio> = None;
@@ -236,68 +237,132 @@ fn execute_line(input: &str) {
         let mut args = split_args(segment);
         if args.is_empty() { continue; }
 
-        if args[0] == "cd" {
-            if args.len() > 1 { change_dir(&args[1]); } else { println!("cd: missing argument"); }
-            continue;
-        } else if args[0] == "pwd" { print_working_dir(); continue; }
-        else if args[0] == "addToPath" {
-            let temporary = args.iter().any(|a| a == "--temp");
-            if args.len() > 1 { add_to_path(&args[1], temporary); } else { println!("addToPath: missing argument"); }
-            continue;
-        } else if args[0] == "pathTool" { list_path(); continue; }
+        match args[0].as_str() {
+            "cd" => {
+                if args.len() > 1 { change_dir(&args[1]); } 
+                else { return Err("cd: missing argument".into()); }
+                continue;
+            }
+            "pwd" => { print_working_dir(); continue; }
+            "addToPath" => {
+                let temporary = args.iter().any(|a| a == "--temp");
+                if args.len() > 1 { add_to_path(&args[1], temporary); } 
+                else { return Err("addToPath: missing argument".into()); }
+                continue;
+            }
+            "pathTool" => { list_path(); continue; }
+            "export" => {
+                if args.len() > 1 {
+                    for var_assignment in &args[1..] {
+                        if let Some(eq_pos) = var_assignment.find('=') {
+                            let key = &var_assignment[..eq_pos];
+                            let value = &var_assignment[eq_pos+1..];
+                            unsafe{
+                            env::set_var(key, value);
+                            }
+                        } else {
+                            println!("export: invalid syntax '{}', expected VAR=VALUE", var_assignment);
+                        }
+                    }
+                } else {
+                    for (key, value) in env::vars() {
+                        println!("{}={}", key, value);
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
 
         let mut stdin_source = previous_output.unwrap_or(Stdio::inherit());
         let mut stdout_target = Stdio::inherit();
 
         if let Some(pos) = args.iter().position(|x| x == ">") {
             if pos + 1 < args.len() {
-                let filename = &args[pos + 1];
-                stdout_target = Stdio::from(File::create(filename).unwrap());
+                stdout_target = Stdio::from(File::create(&args[pos + 1]).map_err(|e| e.to_string())?);
                 args.truncate(pos);
-            }
+            } else { return Err("Syntax error: '>' requires a filename".into()); }
         }
+
         if let Some(pos) = args.iter().position(|x| x == "<") {
             if pos + 1 < args.len() {
-                let filename = &args[pos + 1];
-                stdin_source = Stdio::from(File::open(filename).unwrap());
+                stdin_source = Stdio::from(File::open(&args[pos + 1]).map_err(|e| e.to_string())?);
                 args.truncate(pos);
-            }
+            } else { return Err("Syntax error: '<' requires a filename".into()); }
         }
 
         let args_expanded = expand_globs(args[1..].to_vec());
 
-        let child = Command::new(&args[0])
+        let mut child = Command::new(&args[0])
             .args(&args_expanded)
             .stdin(stdin_source)
             .stdout(if i < pipeline.len() - 1 { Stdio::piped() } else { stdout_target })
-            .spawn();
-
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => { println!("Command failed: {}", e); break; }
-        };
+            .spawn()
+            .map_err(|e| format!("Command failed: {} ({})", e, args[0]))?;
 
         previous_output = child.stdout.take().map(Stdio::from);
-        child.wait().unwrap();
+        child.wait().map_err(|e| e.to_string())?;
     }
+
+    Ok(())
 }
 
+/// ------------------- LOAD .FALSHRC WITH LINE NUMBERS -------------------
 fn load_falshrc() {
     let file = get_falshrc_file();
     if !file.exists() { return; }
-    if let Ok(lines) = BufReader::new(File::open(file).unwrap()).lines().collect::<Result<Vec<_>, _>>() {
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') { continue; } // ignore empty and comments
-            execute_line(trimmed);
+
+    let lines = match BufReader::new(File::open(file).unwrap())
+        .lines()
+        .collect::<Result<Vec<_>, _>>() {
+            Ok(l) => l,
+            Err(e) => {
+                println!("Failed to read ~/.falshrc: {}", e);
+                return;
+            }
+    };
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+
+        if let Err(e) = execute_line(trimmed) {
+            println!("Error executing line {} in ~/.falshrc: '{}': {}", idx + 1, trimmed, e);
         }
     }
 }
 
 fn main() -> rustyline::Result<()> {
+    let mut path = env::var_os("PATH").unwrap_or_default();
+    let extra = "/bin";
+
+    let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+    paths.push(extra.into());
+
+    let new_path = std::env::join_paths(paths).expect("join failed");
+    unsafe { env::set_var("PATH", &new_path) };
     load_persistent_into_env();
-    println!("Running in \x1B[1;3;38;5;214mfalsh\x1B[0m");
-    load_falshrc(); // load ~/.falshrc at startup
+    let plain = "Running in ";
+    let text = "falsh";
+
+    // RGB start (orange) and end (pink) as i32
+    let start_rgb: (i32, i32, i32) = (255, 165, 0);
+    let end_rgb: (i32, i32, i32) = (255, 0, 200);
+
+    let mut gradient = String::new();
+    let len = text.chars().count() as i32; // convert to i32 for arithmetic
+
+    for (i, c) in text.chars().enumerate() {
+        let i = i as i32; // convert index to i32
+        let r = start_rgb.0 + (end_rgb.0 - start_rgb.0) * i / len;
+        let g = start_rgb.1 + (end_rgb.1 - start_rgb.1) * i / len;
+        let b = start_rgb.2 + (end_rgb.2 - start_rgb.2) * i / len;
+
+        // Bold + Italic + RGB per character
+        gradient.push_str(&format!("\x1B[1;3;38;2;{};{};{}m{}\x1B[0m", r, g, b, c));
+    }
+
+    println!("{}{}", plain, gradient);    load_falshrc(); // load ~/.falshrc at startup
 
     let builtins = vec![
         "cd".to_string(),
@@ -305,6 +370,7 @@ fn main() -> rustyline::Result<()> {
         "addToPath".to_string(),
         "listPaths".to_string(),
         "exit".to_string(),
+        "export".to_string(),
     ];
 
     let helper = FalshHelper {
@@ -316,9 +382,8 @@ fn main() -> rustyline::Result<()> {
     rl.set_helper(Some(helper));
 
     loop {
-        // Dynamic prompt showing **full absolute path**
         let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("?"));
-let prompt = format!("{}> ", cwd.display());
+        let prompt = format!("{}> ", cwd.display());
         let readline = rl.readline(&prompt);
         let input = match readline {
             Ok(line) => { let _ = rl.add_history_entry(line.as_str()); line.trim().to_string() },
@@ -330,7 +395,9 @@ let prompt = format!("{}> ", cwd.display());
         if input.is_empty() { continue; }
         if input == "exit" { break; }
 
-        execute_line(&input);
+        if let Err(e) = execute_line(&input) {
+            println!("{}", e);
+        }
     }
 
     Ok(())
